@@ -1,134 +1,227 @@
-import { App, Editor, MarkdownView, Modal, Notice, Plugin, PluginSettingTab, Setting } from 'obsidian';
+import * as os from 'os';
+import * as path from 'path';
+import { exec } from 'child_process';
+import { App, Plugin, TFolder, Menu, Notice, PluginSettingTab, Setting } from 'obsidian';
+import { Option, some, none, getOrElse, map, fold } from 'fp-ts/lib/Option';
+import { pipe } from 'fp-ts/function';
+import { Either, left, right, fold as eitherFold } from 'fp-ts/lib/Either';
 
-// Remember to rename these classes and interfaces!
-
-interface MyPluginSettings {
-	mySetting: string;
+interface PluginSettings {
+    terminalBin: Option<string>;
 }
 
-const DEFAULT_SETTINGS: MyPluginSettings = {
-	mySetting: 'default'
+const DEFAULT_SETTINGS: PluginSettings = {
+    terminalBin: none
+};
+
+type TerminalCommand = {
+    command: string;
+    args: string[];
+};
+
+function inferTerminalCommand(): Either<string, TerminalCommand> {
+    const platform = os.platform();
+
+    switch (platform) {
+        case 'win32':
+            return right({
+                command: 'start powershell.exe',
+                args: []
+            });
+        case 'darwin':
+            return right({
+                command: 'open',
+                args: ['-a', 'Terminal']
+            });
+        case 'linux':
+            // Try to find available terminal emulators
+            const linuxTerminals = [
+                'gnome-terminal',
+                'konsole',
+                'xfce4-terminal',
+                'mate-terminal',
+                'terminator',
+                'alacritty',
+                'kitty',
+                'xterm'
+            ];
+
+            // For now, default to gnome-terminal with fallback
+            return right({
+                command: 'gnome-terminal',
+                args: ['--working-directory']
+            });
+        default:
+            return left(`Unsupported platform: ${platform}`);
+    }
 }
 
-export default class MyPlugin extends Plugin {
-	settings: MyPluginSettings;
-
-	async onload() {
-		await this.loadSettings();
-
-		// This creates an icon in the left ribbon.
-		const ribbonIconEl = this.addRibbonIcon('dice', 'Sample Plugin', (evt: MouseEvent) => {
-			// Called when the user clicks the icon.
-			new Notice('This is a notice!');
-		});
-		// Perform additional things with the ribbon
-		ribbonIconEl.addClass('my-plugin-ribbon-class');
-
-		// This adds a status bar item to the bottom of the app. Does not work on mobile apps.
-		const statusBarItemEl = this.addStatusBarItem();
-		statusBarItemEl.setText('Status Bar Text');
-
-		// This adds a simple command that can be triggered anywhere
-		this.addCommand({
-			id: 'open-sample-modal-simple',
-			name: 'Open sample modal (simple)',
-			callback: () => {
-				new SampleModal(this.app).open();
-			}
-		});
-		// This adds an editor command that can perform some operation on the current editor instance
-		this.addCommand({
-			id: 'sample-editor-command',
-			name: 'Sample editor command',
-			editorCallback: (editor: Editor, view: MarkdownView) => {
-				console.log(editor.getSelection());
-				editor.replaceSelection('Sample Editor Command');
-			}
-		});
-		// This adds a complex command that can check whether the current state of the app allows execution of the command
-		this.addCommand({
-			id: 'open-sample-modal-complex',
-			name: 'Open sample modal (complex)',
-			checkCallback: (checking: boolean) => {
-				// Conditions to check
-				const markdownView = this.app.workspace.getActiveViewOfType(MarkdownView);
-				if (markdownView) {
-					// If checking is true, we're simply "checking" if the command can be run.
-					// If checking is false, then we want to actually perform the operation.
-					if (!checking) {
-						new SampleModal(this.app).open();
-					}
-
-					// This command will only show up in Command Palette when the check function returns true
-					return true;
-				}
-			}
-		});
-
-		// This adds a settings tab so the user can configure various aspects of the plugin
-		this.addSettingTab(new SampleSettingTab(this.app, this));
-
-		// If the plugin hooks up any global DOM events (on parts of the app that doesn't belong to this plugin)
-		// Using this function will automatically remove the event listener when this plugin is disabled.
-		this.registerDomEvent(document, 'click', (evt: MouseEvent) => {
-			console.log('click', evt);
-		});
-
-		// When registering intervals, this function will automatically clear the interval when the plugin is disabled.
-		this.registerInterval(window.setInterval(() => console.log('setInterval'), 5 * 60 * 1000));
-	}
-
-	onunload() {
-
-	}
-
-	async loadSettings() {
-		this.settings = Object.assign({}, DEFAULT_SETTINGS, await this.loadData());
-	}
-
-	async saveSettings() {
-		await this.saveData(this.settings);
-	}
+function createTerminalCommand(
+    settings: PluginSettings,
+    folderPath: string
+): Either<string, string> {
+    return pipe(
+        settings.terminalBin,
+        fold(
+            // If no custom terminal is set, infer from OS
+            () => pipe(
+                inferTerminalCommand(),
+                eitherFold(
+                    (error) => left(error),
+                    (termCmd) => {
+                        const platform = os.platform();
+                        switch (platform) {
+                            case 'win32':
+                                return right(`${termCmd.command} ${termCmd.args.join(' ')} "cd /d \\"${folderPath}\\""`);
+                            case 'darwin':
+                                return right(`${termCmd.command} ${termCmd.args.join(' ')} "${folderPath}"`);
+                            case 'linux':
+                                return right(`${termCmd.command} ${termCmd.args.join(' ')}="${folderPath}"`);
+                            default:
+                                return left('Unsupported platform');
+                        }
+                    }
+                )
+            ),
+            // If custom terminal is set, use it
+            (customTerminal) => {
+                const platform = os.platform();
+                switch (platform) {
+                    case 'win32':
+                        return right(`"${customTerminal}"`);
+                    case 'darwin':
+                        return right(`open -a "${customTerminal}" "${folderPath}"`);
+                    case 'linux':
+                        return right(`"${customTerminal}" --working-directory="${folderPath}"`);
+                    default:
+                        return left('Unsupported platform');
+                }
+            }
+        )
+    );
 }
 
-class SampleModal extends Modal {
-	constructor(app: App) {
-		super(app);
-	}
+export default class OpenInTerminalPlugin extends Plugin {
+    settings: PluginSettings;
 
-	onOpen() {
-		const {contentEl} = this;
-		contentEl.setText('Woah!');
-	}
+    async onload() {
+        await this.loadSettings();
+        console.log('Loading Open in Terminal plugin');
 
-	onClose() {
-		const {contentEl} = this;
-		contentEl.empty();
-	}
+        // Register the context menu event
+        this.registerEvent(
+            this.app.workspace.on('file-menu', (menu: Menu, file: TFolder) => {
+                // Only add menu item for folders
+                if (file instanceof TFolder) {
+                    menu.addItem((item) => {
+                        item
+                            .setTitle('Open in Terminal')
+                            .setIcon('terminal')
+                            .onClick(() => {
+                                this.openTerminalInFolder(file);
+                            });
+                    });
+                }
+            })
+        );
+
+        // Add command for opening terminal in current vault root
+        this.addCommand({
+            id: 'open-terminal-vault-root',
+            name: 'Open Terminal in Vault Root',
+            callback: () => {
+                // @ts-ignore - Obsidian's FileSystemAdapter has a path property
+                const vaultPath = this.app.vault.adapter.path || '';
+                this.openTerminalInPath(vaultPath);
+            }
+        });
+
+        // Add settings tab
+        this.addSettingTab(new TerminalSettingTab(this.app, this));
+    }
+
+    onunload() {
+        console.log('Unloading Open in Terminal plugin');
+    }
+
+    async loadSettings() {
+        this.settings = Object.assign({}, DEFAULT_SETTINGS, await this.loadData());
+    }
+
+    async saveSettings() {
+        await this.saveData(this.settings);
+    }
+
+    private openTerminalInFolder(folder: TFolder) {
+        // @ts-ignore - Obsidian's FileSystemAdapter has a path property
+        const vaultPath = this.app.vault.adapter.path || '';
+        const folderPath = path.join(vaultPath, folder.path);
+        this.openTerminalInPath(folderPath);
+    }
+
+    private openTerminalInPath(folderPath: string) {
+        pipe(
+            createTerminalCommand(this.settings, folderPath),
+            eitherFold(
+                (error) => {
+                    console.error('Error creating terminal command:', error);
+                    new Notice(`Failed to create terminal command: ${error}`);
+                },
+                (command) => {
+                    exec(command, (error) => {
+                        if (error) {
+                            console.error('Error opening terminal:', error);
+                            new Notice(`Failed to open terminal: ${error.message}`);
+                        } else {
+                            new Notice('Terminal opened successfully');
+                        }
+                    });
+                }
+            )
+        );
+    }
 }
 
-class SampleSettingTab extends PluginSettingTab {
-	plugin: MyPlugin;
+class TerminalSettingTab extends PluginSettingTab {
+    plugin: OpenInTerminalPlugin;
 
-	constructor(app: App, plugin: MyPlugin) {
-		super(app, plugin);
-		this.plugin = plugin;
-	}
+    constructor(app: App, plugin: OpenInTerminalPlugin) {
+        super(app, plugin);
+        this.plugin = plugin;
+    }
 
-	display(): void {
-		const {containerEl} = this;
+    display(): void {
+        const { containerEl } = this;
+        containerEl.empty();
 
-		containerEl.empty();
+        containerEl.createEl('h2', { text: 'Terminal Settings' });
 
-		new Setting(containerEl)
-			.setName('Setting #1')
-			.setDesc('It\'s a secret')
-			.addText(text => text
-				.setPlaceholder('Enter your secret')
-				.setValue(this.plugin.settings.mySetting)
-				.onChange(async (value) => {
-					this.plugin.settings.mySetting = value;
-					await this.plugin.saveSettings();
-				}));
-	}
+        new Setting(containerEl)
+            .setName('Custom Terminal Path')
+            .setDesc('Specify a custom terminal application. Leave empty to use system default.')
+            .addText(text => text
+                .setPlaceholder('e.g., /usr/bin/gnome-terminal')
+                .setValue(pipe(
+                    this.plugin.settings.terminalBin,
+                    getOrElse(() => '')
+                ))
+                .onChange(async (value) => {
+                    this.plugin.settings.terminalBin = value.trim() === '' ? none : some(value.trim());
+                    await this.plugin.saveSettings();
+                }));
+
+        // Show current inferred terminal
+        const inferredTerminal = pipe(
+            inferTerminalCommand(),
+            eitherFold(
+                (error) => `Error: ${error}`,
+                (termCmd) => `${termCmd.command} (with args: ${termCmd.args.join(' ')})`
+            )
+        );
+
+        containerEl.createEl('p', {
+            text: `System default terminal: ${inferredTerminal}`,
+            attr: { style: 'color: var(--text-muted); font-size: 0.9em; margin-top: 10px;' }
+        });
+    }
 }

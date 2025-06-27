@@ -1,11 +1,11 @@
 {
-	"id": "sample-plugin",
-	"name": "Sample Plugin",
-	"version": "1.0.0",
+	"id": "open-in-terminal",
+	"name": "Open In Terminal",
+	"version": "0.0.1",
 	"minAppVersion": "0.15.0",
-	"description": "Demonstrates some of the capabilities of the Obsidian API.",
-	"author": "Obsidian",
-	"authorUrl": "https://obsidian.md",
-	"fundingUrl": "https://obsidian.md/pricing",
-	"isDesktopOnly": false
+	"description": "Adds the option to open a directory in the system terminal",
+	"author": "JaegyuDev",
+	"authorUrl": "https://jaegyu.dev",
+	"fundingUrl": "",
+	"isDesktopOnly": true
 }
