@@ -1,21 +1,25 @@
 import * as os from 'os';
 import * as path from 'path';
 import { exec } from 'child_process';
-import { App, Plugin, TFolder, Menu, Notice, PluginSettingTab, Setting } from 'obsidian';
+import { App, Plugin, TFolder, Menu, Notice, PluginSettingTab, Setting, FileSystemAdapter } from 'obsidian';
 import { Option, some, none, getOrElse, map, fold } from 'fp-ts/lib/Option';
 import { pipe } from 'fp-ts/function';
 import { Either, left, right, fold as eitherFold } from 'fp-ts/lib/Either';
+import { warn } from 'console';
+import { option } from 'fp-ts';
 
 interface PluginSettings {
     terminalBin: Option<string>;
+    terminalArgs: Option<string>;
 }
 
 const DEFAULT_SETTINGS: PluginSettings = {
-    terminalBin: none
+    terminalBin: none,
+    terminalArgs: none
 };
 
 type TerminalCommand = {
-    command: string;
+    binary: string;
     args: string[];
 };
 
@@ -25,30 +29,17 @@ function inferTerminalCommand(): Either<string, TerminalCommand> {
     switch (platform) {
         case 'win32':
             return right({
-                command: 'start powershell.exe',
-                args: []
+                binary: 'powershell.exe',
+                args: ['-noexit']
             });
         case 'darwin':
             return right({
-                command: 'open',
-                args: ['-a', 'Terminal']
+                binary: 'Terminal',
+                args: []
             });
         case 'linux':
-            // Try to find available terminal emulators
-            const linuxTerminals = [
-                'gnome-terminal',
-                'konsole',
-                'xfce4-terminal',
-                'mate-terminal',
-                'terminator',
-                'alacritty',
-                'kitty',
-                'xterm'
-            ];
-
-            // For now, default to gnome-terminal with fallback
             return right({
-                command: 'gnome-terminal',
+                binary: 'gnome-terminal',
                 args: ['--working-directory']
             });
         default:
@@ -70,13 +61,18 @@ function createTerminalCommand(
                     (error) => left(error),
                     (termCmd) => {
                         const platform = os.platform();
+                        const quotedPath = `"${folderPath}"`;
+
                         switch (platform) {
                             case 'win32':
-                                return right(`${termCmd.command} ${termCmd.args.join(' ')} "cd /d \\"${folderPath}\\""`);
+                                // Fixed: Use start /d properly with quoted path
+                                return right(`start /d ${quotedPath} ${termCmd.binary} ${termCmd.args.join(' ')}`);
                             case 'darwin':
-                                return right(`${termCmd.command} ${termCmd.args.join(' ')} "${folderPath}"`);
+                                // Fixed: Use proper macOS command
+                                return right(`open -a ${termCmd.binary} ${quotedPath}`);
                             case 'linux':
-                                return right(`${termCmd.command} ${termCmd.args.join(' ')}="${folderPath}"`);
+                                // Fixed: Simpler Linux command
+                                return right(`${termCmd.binary} ${termCmd.args.join(' ')}=${quotedPath}`);
                             default:
                                 return left('Unsupported platform');
                         }
@@ -85,14 +81,33 @@ function createTerminalCommand(
             ),
             // If custom terminal is set, use it
             (customTerminal) => {
+                console.warn("Using custom terminal:", customTerminal);
+                const quotedPath = `"${folderPath}"`;
+                const quotedTerminal = `"${customTerminal}"`;
+
+                // Get custom args if provided
+                const customArgs = pipe(
+                    settings.terminalArgs,
+                    getOrElse(() => '')
+                );
+
+                // Replace {path} placeholder in custom args with actual path
+                const processedArgs = customArgs.replace(/\{path\}/g, quotedPath);
+
+                // If custom args are provided, use them directly (user has full control)
+                if (customArgs.trim() !== '') {
+                    return right(`${quotedTerminal} ${processedArgs}`);
+                }
+
+                // Otherwise, use platform defaults with custom terminal
                 const platform = os.platform();
                 switch (platform) {
                     case 'win32':
-                        return right(`"${customTerminal}"`);
+                        return right(`start /d ${quotedPath} ${quotedTerminal}`);
                     case 'darwin':
-                        return right(`open -a "${customTerminal}" "${folderPath}"`);
+                        return right(`open -a ${quotedTerminal} ${quotedPath}`);
                     case 'linux':
-                        return right(`"${customTerminal}" --working-directory="${folderPath}"`);
+                        return right(`${quotedTerminal} --working-directory=${quotedPath}`);
                     default:
                         return left('Unsupported platform');
                 }
@@ -130,9 +145,20 @@ export default class OpenInTerminalPlugin extends Plugin {
             id: 'open-terminal-vault-root',
             name: 'Open Terminal in Vault Root',
             callback: () => {
-                // @ts-ignore - Obsidian's FileSystemAdapter has a path property
-                const vaultPath = this.app.vault.adapter.path || '';
-                this.openTerminalInPath(vaultPath);
+                const adapter = this.app.vault.adapter;
+                if (adapter instanceof FileSystemAdapter) {
+                    try {
+                        const basePath = adapter.getBasePath();
+                        if (basePath) {
+                            this.openTerminalInPath(basePath);
+                        } else {
+                            new Notice('Could not determine vault path.');
+                        }
+                    } catch (error) {
+                        console.error('Error getting vault path:', error);
+                        new Notice('Could not determine vault path.');
+                    }
+                }
             }
         });
 
@@ -153,13 +179,26 @@ export default class OpenInTerminalPlugin extends Plugin {
     }
 
     private openTerminalInFolder(folder: TFolder) {
-        // @ts-ignore - Obsidian's FileSystemAdapter has a path property
-        const vaultPath = this.app.vault.adapter.path || '';
-        const folderPath = path.join(vaultPath, folder.path);
-        this.openTerminalInPath(folderPath);
+        const adapter = this.app.vault.adapter;
+        if (adapter instanceof FileSystemAdapter) {
+            try {
+                const vaultPath = adapter.getBasePath();
+                if (vaultPath) {
+                    const folderPath = path.join(vaultPath, folder.path);
+                    this.openTerminalInPath(folderPath);
+                } else {
+                    new Notice('Could not determine vault path.');
+                }
+            } catch (error) {
+                console.error('Error getting folder path:', error);
+                new Notice('Could not determine folder path.');
+            }
+        }
     }
 
     private openTerminalInPath(folderPath: string) {
+        console.log('Opening terminal in path:', folderPath);
+
         pipe(
             createTerminalCommand(this.settings, folderPath),
             eitherFold(
@@ -168,11 +207,16 @@ export default class OpenInTerminalPlugin extends Plugin {
                     new Notice(`Failed to create terminal command: ${error}`);
                 },
                 (command) => {
-                    exec(command, (error) => {
+                    console.log('Executing command:', command);
+                    exec(command, (error, stdout, stderr) => {
                         if (error) {
                             console.error('Error opening terminal:', error);
+                            console.error('Command that failed:', command);
+                            if (stderr) console.error('stderr:', stderr);
                             new Notice(`Failed to open terminal: ${error.message}`);
                         } else {
+                            console.log('Terminal opened successfully');
+                            if (stdout) console.log('stdout:', stdout);
                             new Notice('Terminal opened successfully');
                         }
                     });
@@ -210,12 +254,26 @@ class TerminalSettingTab extends PluginSettingTab {
                     await this.plugin.saveSettings();
                 }));
 
+        new Setting(containerEl)
+            .setName('Custom Terminal Arguments')
+            .setDesc('Arguments to pass to your custom terminal. Use {path} as placeholder for the folder path. Leave empty for platform defaults.')
+            .addTextArea(text => text
+                .setPlaceholder('e.g., --working-directory={path} --title="Obsidian Terminal"')
+                .setValue(pipe(
+                    this.plugin.settings.terminalArgs,
+                    getOrElse(() => '')
+                ))
+                .onChange(async (value) => {
+                    this.plugin.settings.terminalArgs = value.trim() === '' ? none : some(value.trim());
+                    await this.plugin.saveSettings();
+                }));
+
         // Show current inferred terminal
         const inferredTerminal = pipe(
             inferTerminalCommand(),
             eitherFold(
                 (error) => `Error: ${error}`,
-                (termCmd) => `${termCmd.command} (with args: ${termCmd.args.join(' ')})`
+                (termCmd) => `${termCmd.binary} (with args: ${termCmd.args.join(' ')})`
             )
         );
 
